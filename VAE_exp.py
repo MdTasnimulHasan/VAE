@@ -14,9 +14,7 @@ import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 import ast
 
-df = pd.read_csv('metadata_vectorised_split_cleansed_prospectus_investment_ovjective.txt', sep="\t", header=None)
-
-# print(df[3][:])
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class CustomDataset(Dataset):
@@ -32,74 +30,12 @@ class CustomDataset(Dataset):
 
     def __len__(self):
         return len(self.vector)
-    
-dataset = CustomDataset(dataframe=df)
 
-train_size = int(0.8 * len(dataset)) 
-test_size = len(dataset) - train_size 
-train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
-
-# (len(train_dataset), len(test_dataset))
-
-# dataloader = DataLoader(dataset = dataset)
-# for sample in dataloader:
-#     print(sample.size())
-#     break
-
-
-# create train and test dataloaders
-batch_size = 2
-train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
-test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
-# batch_size=batch_size,
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Device: ", device)   
-
-
-
-class Encoder(nn.Module):
-    
-    def __init__(self, input_dim=768, hidden_dim=512, latent_dim=256):
-        super(Encoder, self).__init__()
-
-        self.linear1 = nn.Linear(input_dim, hidden_dim)
-        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
-        self.mean = nn.Linear(hidden_dim, latent_dim)
-        self.var = nn.Linear (hidden_dim, latent_dim)
-        self.LeakyReLU = nn.LeakyReLU(0.2)
-        self.training = True
-        
-    def forward(self, x):
-        x = self.LeakyReLU(self.linear1(x))
-        x = self.LeakyReLU(self.linear2(x))
-
-        mean = self.mean(x)
-        log_var = self.var(x)                     
-        return mean, log_var
-     
-
-class Decoder(nn.Module):
-    
-    def __init__(self, output_dim=768, hidden_dim=512, latent_dim=256):
-        super(Decoder, self).__init__()
-
-        self.linear2 = nn.Linear(latent_dim, hidden_dim)
-        self.linear1 = nn.Linear(hidden_dim, hidden_dim)
-        self.output = nn.Linear(hidden_dim, output_dim)
-        self.LeakyReLU = nn.LeakyReLU(0.2)
-        
-    def forward(self, x):
-        x = self.LeakyReLU(self.linear2(x))
-        x = self.LeakyReLU(self.linear1(x))
-        
-        x_hat = torch.sigmoid(self.output(x))
-        return x_hat
      
 
 class VAE(nn.Module):
 
-    def __init__(self, input_dim=768, hidden_dim=400, latent_dim=200, device=device):
+    def __init__(self, input_dim=768, hidden_dim=400, latent_dim=2, device=device):
         super(VAE, self).__init__()
 
         # encoder
@@ -127,7 +63,7 @@ class VAE(nn.Module):
     def encode(self, x):
         x = self.encoder(x)
         mean, logvar = self.mean_layer(x), self.logvar_layer(x)
-        return mean, logvar
+        return mean, logvar, x
 
     def reparameterization(self, mean, var):
         epsilon = torch.randn_like(var).to(device)      
@@ -138,33 +74,34 @@ class VAE(nn.Module):
         return self.decoder(x)
 
     def forward(self, x):
-        mean, logvar = self.encode(x)
+        mean, logvar, _ = self.encode(x)
         z = self.reparameterization(mean, logvar)
         x_hat = self.decode(z)
-        return x_hat, self.mean, self.log_var
+        return x_hat, mean, logvar
         
-    def forward(self, x):
-        mean, log_var = self.encode(x)
-        z = self.reparameterization(mean, torch.exp(0.5 * log_var)) 
-        x_hat = self.decode(z)  
-        return x_hat, mean, log_var
-     
 
-model = VAE().to(device)
-optimizer = Adam(model.parameters(), lr=1e-5)
      
 
 def loss_function(x, x_hat, mean, log_var):
-    reproduction_loss = nn.functional.binary_cross_entropy(x_hat, x, reduction='sum')
-    KLD = - 0.5 * torch.sum(1+ log_var - mean.pow(2) - log_var.exp())
-    loss = reproduction_loss + KLD
+    
+    
+    # The block below results in negative loss
+    
+    # reproduction_loss = nn.functional.binary_cross_entropy(x_hat, x, reduction='sum')
+    # KLD = - 0.5 * torch.sum(1+ log_var - mean.pow(2) - log_var.exp())
+    # loss = reproduction_loss + KLD
+    
+    reconstruction_loss_fn = nn.MSELoss()
+    reconstruction_loss = reconstruction_loss_fn(x_hat, x)
+
+    loss = reconstruction_loss 
     return loss
      
 
-def train(model, optimizer, epochs, device, x_dim=768):
+def train(model, optimizer, epochs, device, batch_size, train_loader, test_loader, x_dim=768):
     model.train()
     for epoch in range(epochs):
-        overall_loss = 0
+        train_loss = 0
         for batch_idx, x in enumerate(train_loader):
             x = x.view(batch_size, x_dim).to(device)
 
@@ -173,13 +110,65 @@ def train(model, optimizer, epochs, device, x_dim=768):
             x_hat, mean, log_var = model(x)
             loss = loss_function(x, x_hat, mean, log_var)
             
-            overall_loss += loss.item()
+            train_loss += loss.item()
             
             loss.backward()
             optimizer.step()
 
-        print("\tEpoch", epoch + 1, "\tAverage Loss: ", overall_loss/(batch_idx*batch_size))
-    return overall_loss
-     
+        print("\tEpoch", epoch + 1, "\tAverage Train Loss: ", train_loss/(batch_idx*batch_size))
+        
+        
+        model.eval()        
+        test_loss = 0
+        test_batch_size = 1
+        for batch_idx, x in enumerate(test_loader):
+            x = x.view(test_batch_size, x_dim).to(device)
+            x_hat, mean, log_var = model(x)
+            loss = loss_function(x, x_hat, mean, log_var)
+            test_loss += loss.item()
+            
 
-train(model, optimizer, epochs=500, device=device)
+        print("\tEpoch", epoch + 1, "\tAverage Test Loss: ", test_loss/(batch_idx*batch_size))
+        
+        
+    return train_loss
+
+def inference(model, device, test_loader, x_dim=768):
+    
+    model.eval()
+    inference_size = 1
+    for batch_idx, x in enumerate(test_loader):
+        x = x.view(inference_size, x_dim).to(device)
+        mean, log_var, x2 = model.encode(x)
+        
+    return x2
+
+def main():
+    
+    df = pd.read_csv('metadata_vectorised_split_cleansed_prospectus_investment_ovjective.txt', sep="\t", header=None)
+    dataset = CustomDataset(dataframe=df)
+
+    train_size = int(0.8 * len(dataset)) 
+    test_size = len(dataset) - train_size 
+    train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+
+
+    # create train and test dataloaders
+    batch_size = 2
+    test_batch_size = 1
+    train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(dataset=test_dataset, batch_size=test_batch_size, shuffle=False)
+    
+    
+    model = VAE().to(device)
+   
+    optimizer = Adam(model.parameters(), lr=1e-5)
+    
+    epochs=500
+    train(model, optimizer, epochs, device, batch_size, train_loader, test_loader)
+    outout_vector = inference(model, device, test_loader)
+    print(outout_vector.size())
+    
+    return
+if __name__ == '__main__':
+    main()
