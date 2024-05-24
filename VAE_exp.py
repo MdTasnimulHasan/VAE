@@ -13,20 +13,40 @@ from torchvision.utils import save_image, make_grid
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 import ast
+import os
+import argparse
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def get_args():
+    """
+    make parser to get parameters
+    """
+
+    parser = argparse.ArgumentParser(
+        prog='VAE',
+        description='using VAE for 768 dimensional data',
+        epilog='Example: python VAE_exp.py --src_filename --output_filename')
+    
+    parser.add_argument('--src_filename', type = str, default = 'metadata_vectorised_split_cleansed_prospectus_investment_ovjective.txt', help='source txt file')
+    parser.add_argument('--output_filename', type = str, default = 'output.txt', help='output_filepath')
+    
+
+    return parser.parse_args()
 
 
 class CustomDataset(Dataset):
     def __init__(self, dataframe):
         self.vector = dataframe[3]
-
+        self.metadata = dataframe[0]
+        self.idx = dataframe[1]
+        self.sentence = dataframe[2]
     def __getitem__(self, index):
         
         vector_data = np.array(ast.literal_eval(self.vector[index])).astype(np.float32)
         # print(vector_data.dtype)
         
-        return vector_data
+        return vector_data, self.metadata[index], self.idx[index], self.sentence[index]
 
     def __len__(self):
         return len(self.vector)
@@ -102,7 +122,8 @@ def train(model, optimizer, epochs, device, batch_size, train_loader, test_loade
     model.train()
     for epoch in range(epochs):
         train_loss = 0
-        for batch_idx, x in enumerate(train_loader):
+        for batch_idx, xf in enumerate(train_loader):
+            x = xf[0]
             x = x.view(batch_size, x_dim).to(device)
 
             optimizer.zero_grad()
@@ -121,7 +142,8 @@ def train(model, optimizer, epochs, device, batch_size, train_loader, test_loade
         model.eval()        
         test_loss = 0
         test_batch_size = 1
-        for batch_idx, x in enumerate(test_loader):
+        for batch_idx, xf in enumerate(test_loader):
+            x = xf[0]
             x = x.view(test_batch_size, x_dim).to(device)
             x_hat, mean, log_var = model(x)
             loss = loss_function(x, x_hat, mean, log_var)
@@ -133,19 +155,42 @@ def train(model, optimizer, epochs, device, batch_size, train_loader, test_loade
         
     return train_loss
 
-def inference(model, device, test_loader, x_dim=768):
+def inference(args, model, device, test_loader, x_dim=768):
     
     model.eval()
     inference_size = 1
-    for batch_idx, x in enumerate(test_loader):
+    for batch_idx, xf in enumerate(test_loader):
+     
+        x = xf[0]
         x = x.view(inference_size, x_dim).to(device)
         mean, log_var, x2 = model.encode(x)
+        
+        outout_vector = x2
+        str_output = str(outout_vector.detach().cpu().numpy())
+        print(str_output)
+        
+        test_metadata_name = ' '.join(str(value) for value in xf[1])
+        print(test_metadata_name)
+        
+        test_metadata_idx = ' '.join(str(value) for value in (xf[2].detach().cpu().numpy()))
+        print(test_metadata_idx)
+        
+        test_metadata_str = ' '.join(str(value) for value in xf[3])
+        print(test_metadata_str)
+        
+        
+        write_str = test_metadata_name + '\t' + test_metadata_idx + '\t' + test_metadata_str + '\t' + str_output
+        
+        with open(args.output_filename, 'a') as file:
+            file.write(write_str + '\n')
         
     return x2
 
 def main():
     
-    df = pd.read_csv('metadata_vectorised_split_cleansed_prospectus_investment_ovjective.txt', sep="\t", header=None)
+    args = get_args()
+    
+    df = pd.read_csv(args.src_filename, sep="\t", header=None)
     dataset = CustomDataset(dataframe=df)
 
     train_size = int(0.8 * len(dataset)) 
@@ -164,11 +209,11 @@ def main():
    
     optimizer = Adam(model.parameters(), lr=1e-5)
     
-    epochs=500
+    epochs= 50000
     train(model, optimizer, epochs, device, batch_size, train_loader, test_loader)
-    outout_vector = inference(model, device, test_loader)
-    print(outout_vector.size())
+    inference(args, model, device, test_loader)
     
+
     return
 if __name__ == '__main__':
     main()
